@@ -1,0 +1,750 @@
+---
+title: "LIMPIEZA DE DATOS - RECLUTAMIENTO (VERDATA R3)"
+author: "Edward Bonilla, Juana Bello"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Librerías (todas al inicio del documento)
+library(dplyr)
+library(writexl)
+
+# ---- PARÁMETROS DE DECISIÓN ----
+# TRUE  = aplica la eliminación (como en la clase)
+# FALSE = solo detecta y marca, sin eliminar filas
+ELIMINAR_DUPLICADOS <- FALSE   # duplicados SIN contar el identificador
+ELIMINAR_ATIPICOS   <- FALSE   # atípicos por IQR en variables cuantitativas
+```
+
+# LIMPIEZA DE DATOS
+
+Aplicamos la cadena de análisis vista en la **Clase 1** (exploración, faltantes, duplicados, texto, inconsistencias, atípicos, estandarización, normalización y exportación) a la base de **reclutamiento (Verdata, réplica R3)**.
+
+```{r}
+list.files("../Datos") # Visualizo archivos de la carpeta
+```
+
+En esta línea cargamos la matriz de datos (ruta relativa a la carpeta del proyecto):
+
+```{r}
+data <- read.csv("E:/Mis Documentos/Desktop/ESPECIALIZA AI/datos/ACTIVIDAD 1/ACTIVIDAD-1-CIENCIA-DE-DATOS-/DATOS/verdata-reclutamiento-R3.csv", fileEncoding = "UTF-8")
+```
+
+Visualizamos los datos
+
+```{r, results='hide'}
+data
+```
+
+## Diccionario de variables
+
+| Variable | Descripción |
+|---|---|
+| `replica` | Réplica de los datos (constante: "R3") |
+| `match_group_id` | Identificador único del caso (hash) |
+| `in_1` ... `in_34` | Indicadoras 0/1: presencia del caso en cada una de las 34 fuentes |
+| `edad_categoria` | Edad en quinquenios (0-4, 5-9, ..., 95+) |
+| `edad_jep` | Ciclo de vida: Infancia / Adolescencia / Adultez |
+| `etnia` | Mestizo, Indígena, NARP, ROM |
+| `sexo` | Hombre / Mujer |
+| `p_str` | Presunto responsable (GUE-FARC, GUE-ELN, GUE-OTRO, PARA, EST, OTRO, múltiple) |
+| `dept_code_hecho`, `muni_code_hecho` | Códigos DIVIPOLA del departamento y municipio del hecho |
+| `yy_hecho`, `yymm_hecho` | Año y año-mes del hecho |
+| `is_conflict` | Indicadora de hecho en el marco del conflicto |
+| `*_imputed` | Indicadoras de si el valor de esa variable fue imputado |
+
+## Exploración de los datos
+
+```{r}
+head(data)
+```
+
+```{r}
+tail(data)
+```
+
+```{r}
+dim(data)
+```
+
+```{r}
+colnames(data)
+```
+
+```{r}
+str(data)
+```
+
+### Variables derivadas
+
+Para poder aplicar el análisis cuantitativo de la clase (que usó Ingreso, Edad e Hijos) construimos variables numéricas a partir de las existentes:
+
+- `n_fuentes`: número de fuentes en las que aparece el caso (suma de `in_1` a `in_34`).
+- `edad_aprox`: punto medio de cada categoría de edad (aproximación; para "95+" se usa 95).
+- `mes_hecho`: mes extraído de `yymm_hecho`.
+- `departamento`: nombre del departamento a partir del código DIVIPOLA.
+
+```{r}
+# Número de fuentes por caso
+data$n_fuentes <- rowSums(data[ , paste0("in_", 1:34)])
+
+# Edad aproximada (punto medio de la categoría)
+edad_puntos <- c("0-4" = 2, "5-9" = 7, "10-14" = 12, "15-19" = 17,
+                 "20-24" = 22, "25-29" = 27, "30-34" = 32, "35-39" = 37,
+                 "40-44" = 42, "45-49" = 47, "50-54" = 52, "55-59" = 57,
+                 "60-64" = 62, "65-69" = 67, "70-74" = 72, "75-79" = 77,
+                 "80-84" = 82, "85-89" = 87, "90-94" = 92, "95+" = 95)
+data$edad_aprox <- unname(edad_puntos[data$edad_categoria])
+
+# Mes del hecho
+data$mes_hecho <- data$yymm_hecho %% 100
+
+# Nombre del departamento (códigos DIVIPOLA)
+dept_nombres <- c("5" = "Antioquia", "8" = "Atlántico", "11" = "Bogotá D.C.",
+                  "13" = "Bolívar", "15" = "Boyacá", "17" = "Caldas",
+                  "18" = "Caquetá", "19" = "Cauca", "20" = "Cesar",
+                  "23" = "Córdoba", "25" = "Cundinamarca", "27" = "Chocó",
+                  "41" = "Huila", "44" = "La Guajira", "47" = "Magdalena",
+                  "50" = "Meta", "52" = "Nariño", "54" = "Norte de Santander",
+                  "63" = "Quindío", "66" = "Risaralda", "68" = "Santander",
+                  "70" = "Sucre", "73" = "Tolima", "76" = "Valle del Cauca",
+                  "81" = "Arauca", "85" = "Casanare", "86" = "Putumayo",
+                  "88" = "San Andrés", "91" = "Amazonas", "94" = "Guainía",
+                  "95" = "Guaviare", "97" = "Vaupés", "99" = "Vichada")
+data$departamento <- unname(dept_nombres[as.character(data$dept_code_hecho)])
+```
+
+```{r}
+# Función para tablas de frecuencia (frecuencia absoluta y porcentaje)
+tabla_freq <- function(x, nombre) {
+  tab <- data.frame(sort(table(x), decreasing = TRUE))
+  colnames(tab) <- c(nombre, "Frecuencia")
+  tab$Porcentaje <- round(100 * tab$Frecuencia / sum(tab$Frecuencia), 1)
+  tab
+}
+```
+
+### ANALISIS DE SEXO
+
+```{r}
+tabla_Sexo <- tabla_freq(data$sexo, "Sexo")
+
+tabla_Sexo
+```
+
+**De un total de `r nrow(data)` casos analizados ($n = `r nrow(data)`$), predomina el sexo `r tolower(tabla_Sexo$Sexo[1])` con `r tabla_Sexo$Frecuencia[1]` casos, equivalente al `r tabla_Sexo$Porcentaje[1]`% del total; el sexo `r tolower(tabla_Sexo$Sexo[2])` registra `r tabla_Sexo$Frecuencia[2]` casos (`r tabla_Sexo$Porcentaje[2]`%).**
+
+### ANALISIS DE ETNIA
+
+```{r}
+tabla_Etnia <- tabla_freq(data$etnia, "Etnia")
+
+tabla_Etnia
+```
+
+**De un total de `r nrow(data)` casos, la categoría predominante es `r tolower(tabla_Etnia$Etnia[1])` con `r tabla_Etnia$Frecuencia[1]` casos (`r tabla_Etnia$Porcentaje[1]`%). En segundo lugar se ubica `r tolower(tabla_Etnia$Etnia[2])` (`r tabla_Etnia$Porcentaje[2]`%), seguida de `r tolower(tabla_Etnia$Etnia[3])` (`r tabla_Etnia$Porcentaje[3]`%). La categoría con menor participación es `r tolower(tabla_Etnia$Etnia[nrow(tabla_Etnia)])` con `r tabla_Etnia$Frecuencia[nrow(tabla_Etnia)]` casos.**
+
+### ANALISIS DEL PRESUNTO RESPONSABLE
+
+```{r}
+tabla_Responsable <- tabla_freq(data$p_str, "Presunto_Responsable")
+
+tabla_Responsable
+```
+
+**El presunto responsable más frecuente es `r tabla_Responsable$Presunto_Responsable[1]` con `r tabla_Responsable$Frecuencia[1]` casos (`r tabla_Responsable$Porcentaje[1]`%), seguido de `r tabla_Responsable$Presunto_Responsable[2]` (`r tabla_Responsable$Porcentaje[2]`%) y `r tabla_Responsable$Presunto_Responsable[3]` (`r tabla_Responsable$Porcentaje[3]`%). Se observa además que la categoría `multiple` está escrita en minúscula mientras las demás van en mayúscula: una inconsistencia de formato que se corrige en la limpieza de texto.**
+
+### ANALISIS DEL CICLO DE VIDA (EDAD JEP)
+
+```{r}
+tabla_Edad_JEP <- tabla_freq(data$edad_jep, "Ciclo_Vida")
+
+tabla_Edad_JEP
+```
+
+**La categoría predominante es `r tolower(tabla_Edad_JEP$Ciclo_Vida[1])` con `r tabla_Edad_JEP$Frecuencia[1]` casos (`r tabla_Edad_JEP$Porcentaje[1]`%), seguida de `r tolower(tabla_Edad_JEP$Ciclo_Vida[2])` (`r tabla_Edad_JEP$Porcentaje[2]`%) y `r tolower(tabla_Edad_JEP$Ciclo_Vida[3])` (`r tabla_Edad_JEP$Porcentaje[3]`%).**
+
+### ANALISIS DE LA CATEGORÍA DE EDAD
+
+```{r}
+tabla_Edad_Cat <- tabla_freq(data$edad_categoria, "Edad_Categoria")
+
+tabla_Edad_Cat
+```
+
+**La categoría de edad más frecuente es `r tabla_Edad_Cat$Edad_Categoria[1]` años (`r tabla_Edad_Cat$Porcentaje[1]`%), seguida de `r tabla_Edad_Cat$Edad_Categoria[2]` años (`r tabla_Edad_Cat$Porcentaje[2]`%). En conjunto, las edades de 10 a 19 años concentran el `r round(100 * mean(data$edad_categoria %in% c("10-14", "15-19")), 1)`% de los casos. Llama la atención la presencia de categorías de 90 años o más, que se revisan en la sección de inconsistencias.**
+
+### ANALISIS DEL DEPARTAMENTO DEL HECHO
+
+```{r}
+tabla_Departamento <- tabla_freq(data$departamento, "Departamento")
+
+head(tabla_Departamento, 10)
+```
+
+**De los `r nrow(tabla_Departamento)` departamentos con registros, los tres con más casos son `r tabla_Departamento$Departamento[1]` (`r tabla_Departamento$Porcentaje[1]`%), `r tabla_Departamento$Departamento[2]` (`r tabla_Departamento$Porcentaje[2]`%) y `r tabla_Departamento$Departamento[3]` (`r tabla_Departamento$Porcentaje[3]`%), que juntos suman el `r sum(tabla_Departamento$Porcentaje[1:3])`% del total.**
+
+## ANÁLISIS DE VARIABLES CUANTITATIVAS
+
+```{r}
+vars_num <- c("yy_hecho", "edad_aprox", "n_fuentes")
+
+summary(data[vars_num])
+```
+
+### Año del hecho
+
+```{r}
+boxplot(
+  data$yy_hecho,
+  horizontal = TRUE,
+  col = "skyblue",
+  border = "darkblue",
+  main = "Cajas y Bigotes del Año del Hecho",
+  xlab = "Año")
+```
+
+```{r}
+hist(
+  data$yy_hecho,
+  col = "skyblue",
+  border = "darkblue",
+  main = "Histograma del Año del Hecho",
+  xlab = "Año")
+```
+
+### Edad aproximada
+
+```{r}
+boxplot(
+  data$edad_aprox,
+  horizontal = TRUE,
+  col = "skyblue",
+  border = "darkblue",
+  main = "Cajas y Bigotes de Edad Aproximada",
+  xlab = "Edad")
+```
+
+```{r}
+hist(
+  data$edad_aprox,
+  col = "skyblue",
+  border = "darkblue",
+  main = "Histograma de Edad Aproximada",
+  xlab = "Edad")
+```
+
+### Número de fuentes
+
+```{r}
+boxplot(
+  data$n_fuentes,
+  horizontal = TRUE,
+  col = "skyblue",
+  border = "darkblue",
+  main = "Cajas y Bigotes del Número de Fuentes",
+  xlab = "Número de fuentes")
+```
+
+```{r}
+hist(
+  data$n_fuentes,
+  breaks = seq(0.5, max(data$n_fuentes) + 0.5, by = 1),
+  col = "skyblue",
+  border = "darkblue",
+  main = "Histograma del Número de Fuentes",
+  xlab = "Número de fuentes")
+```
+
+**El año del hecho se concentra alrededor de `r median(data$yy_hecho)` (mediana), con un rango de `r min(data$yy_hecho)` a `r max(data$yy_hecho)`. La edad aproximada presenta una distribución asimétrica a la derecha, con la mayoría de casos entre 10 y 19 años. El número de fuentes por caso tiene mediana de `r median(data$n_fuentes)` y máximo de `r max(data$n_fuentes)`: la mayoría de casos aparece en una o dos fuentes.**
+
+# 5. Limpieza de datos
+
+## Valores faltantes
+
+Valores perdidos en todo el data frame
+
+```{r}
+# Número total de datos perdidos en el dataframe
+total_na <- sum(is.na(data))
+
+print(paste("Total de datos perdidos:", total_na))
+```
+
+**Total de datos perdidos: `r total_na`.** (Esta base ya viene con las variables principales imputadas, como se revisa más abajo.)
+
+Valores faltantes por columnas
+
+```{r}
+# Número de datos perdidos por columna
+na_por_columna <- colSums(is.na(data))
+
+# Crear un dataframe con los resultados
+tabla_na <- data.frame(
+  Columna = names(na_por_columna), # obtiene los nombres de las columnas
+  Datos_Perdidos = na_por_columna  # contiene la cantidad de NA por variable
+)
+
+# Ordenar de mayor a menor y agregar la fila "Total" al final
+tabla_na_ordenada <- tabla_na %>%
+  arrange(desc(Datos_Perdidos)) %>%
+  rbind(data.frame(Columna = "Total", Datos_Perdidos = total_na))
+
+head(tabla_na_ordenada, 10)
+```
+
+### Valores imputados
+
+Esta base ya trae indicadoras `*_imputed` que señalan qué valores fueron imputados en origen. Es la forma de "dato faltante" que debemos reportar.
+
+```{r}
+vars_imputed <- grep("_imputed$", names(data), value = TRUE)
+
+tabla_imputados <- data.frame(
+  Variable = sub("_imputed$", "", vars_imputed),
+  Imputados = sapply(data[vars_imputed], sum),
+  Porcentaje = round(100 * sapply(data[vars_imputed], mean), 1),
+  row.names = NULL
+) %>%
+  arrange(desc(Imputados))
+
+tabla_imputados
+```
+
+**La variable con mayor proporción de valores imputados es `r tabla_imputados$Variable[1]` (`r tabla_imputados$Porcentaje[1]`% de los casos), seguida de `r tabla_imputados$Variable[2]` (`r tabla_imputados$Porcentaje[2]`%). Estos valores se conservan, pero deben tenerse presentes al interpretar resultados por etnia, sexo o presunto responsable.**
+
+## TOTAL DATOS DUPLICADOS
+
+```{r}
+sum(duplicated(data))
+```
+
+**Con todas las columnas, no hay duplicados porque `match_group_id` es único para cada caso.**
+
+```{r}
+length(unique(data$match_group_id)) == nrow(data)
+```
+
+Repetimos la revisión sin considerar las columnas identificadoras (`replica` y `match_group_id`), igual que en clase se excluyó la columna 1 (ID):
+
+```{r}
+cols_id <- c("replica", "match_group_id")
+
+data_sin_id <- data[ , !(names(data) %in% cols_id)]
+
+sum(duplicated(data_sin_id))
+```
+
+```{r}
+head(data[duplicated(data_sin_id), ])
+```
+
+**Sin contar el identificador hay `r sum(duplicated(data_sin_id))` registros con atributos idénticos (`r round(100 * sum(duplicated(data_sin_id)) / nrow(data), 1)`% de la base). Como cada `match_group_id` es único, se interpretan como casos distintos con las mismas características (por ejemplo, mismo sexo, edad, lugar y año) y no como errores de digitación. Por eso, por defecto, no se eliminan (parámetro `ELIMINAR_DUPLICADOS <- FALSE`). Si se cambia a `TRUE`, el código los elimina.**
+
+```{r}
+if (ELIMINAR_DUPLICADOS) {
+  data_sin <- data[!duplicated(data_sin_id), ]
+} else {
+  data_sin <- data
+}
+
+dim(data_sin)
+```
+
+## COMO SE ELIMINAN DATOS PERDIDOS
+
+```{r}
+data_limpia <- na.omit(data_sin)
+head(data_limpia)
+```
+
+```{r}
+dim(data_limpia)
+```
+
+## DEJAR VARIABLES SOLO CON LA PRIMERA LETRA EN MAYÚSCULA
+
+```{r}
+# Variables cualitativas (se excluyen los identificadores y los códigos)
+vars_cualitativas <- c(
+  "sexo",
+  "etnia",
+  "p_str",
+  "edad_jep",
+  "edad_categoria"
+)
+```
+
+```{r}
+# Función: minúsculas, sin tildes y solo la primera letra en mayúscula
+capitalizar <- function(x) {
+  x <- as.character(x)
+  x <- tolower(x)
+  x <- iconv(x, from = "UTF-8", to = "ASCII//TRANSLIT")
+  paste0(
+    toupper(substr(x, 1, 1)),
+    substr(x, 2, nchar(x))
+  )
+}
+
+data_limpia[vars_cualitativas] <- lapply(data_limpia[vars_cualitativas], capitalizar)
+```
+
+```{r}
+head(data_limpia)
+```
+
+```{r}
+tabla_Sexo2 <- tabla_freq(data_limpia$sexo, "Sexo")
+
+tabla_Sexo2
+```
+
+```{r}
+tabla_Etnia2 <- tabla_freq(data_limpia$etnia, "Etnia")
+
+tabla_Etnia2
+```
+
+```{r}
+tabla_Responsable2 <- tabla_freq(data_limpia$p_str, "Presunto_Responsable")
+
+tabla_Responsable2
+```
+
+**Ahora todas las categorías comparten el mismo formato (por ejemplo, "Multiple" ya no se distingue por mayúsculas/minúsculas). Las siglas quedan con solo la primera letra en mayúscula (Narp, Gue-farc, etc.), tal como se aplicó el procedimiento de la clase.**
+
+```{r}
+tabla_Edad_JEP2 <- tabla_freq(data_limpia$edad_jep, "Ciclo_Vida")
+
+tabla_Edad_JEP2
+```
+
+## Agrupar presuntos responsables en una nueva columna
+
+Equivalente a unificar casado/casada y soltero/soltera de la clase: aquí agrupamos las tres categorías de guerrilla (GUE-FARC, GUE-ELN y GUE-OTRO) en una sola, y damos nombre explícito a las demás (supuesto: PARA = paramilitares, EST = agentes del Estado).
+
+```{r}
+data_limpia$p_str_grupo <- case_when(
+  tolower(data_limpia$p_str) %in% c("gue-farc", "gue-eln", "gue-otro") ~ "Guerrilla",
+  tolower(data_limpia$p_str) == "para"     ~ "Paramilitar",
+  tolower(data_limpia$p_str) == "est"      ~ "Agente del Estado",
+  tolower(data_limpia$p_str) == "multiple" ~ "Multiple",
+  TRUE                                     ~ data_limpia$p_str
+)
+```
+
+```{r}
+table(data_limpia$p_str_grupo)
+```
+
+## correcciones de errores o inconsistencias
+
+```{r}
+summary(data_limpia$yy_hecho)
+```
+
+```{r}
+summary(data_limpia$edad_aprox)
+```
+
+```{r}
+table(data_limpia$edad_categoria, data_limpia$edad_jep)
+```
+
+**La categoría de edad 15-19 aparece repartida entre Adolescencia y Adultez; esto es coherente con un corte a los 18 años dentro de ese quinquenio y no se considera error.**
+
+```{r}
+# Casos con edad de 90 años o más: implausible para reclutamiento
+data_limpia[data_limpia$edad_categoria %in% c("90-94", "95+"), c("match_group_id", "edad_categoria", "edad_jep", "yy_hecho", "p_str", "edad_categoria_imputed")] %>%
+  head(10)
+```
+
+**Se identifican `r sum(data_limpia$edad_categoria %in% c("90-94", "95+"))` casos con edad de 90 años o más en el momento del hecho. Se consideran inconsistencias (equivalente a la Edad >= 100 de la clase) y se excluyen.**
+
+Resumen de reglas de validación:
+
+```{r}
+anio_actual <- as.numeric(format(Sys.Date(), "%Y"))
+
+inconsistencias <- data.frame(
+  anio_invalido         = data_limpia$yy_hecho < 1900 | data_limpia$yy_hecho > anio_actual,
+  mes_invalido          = data_limpia$mes_hecho < 1 | data_limpia$mes_hecho > 12,
+  fecha_incoherente     = data_limpia$yymm_hecho %/% 100 != data_limpia$yy_hecho,
+  muni_incoherente      = data_limpia$muni_code_hecho %/% 1000 != data_limpia$dept_code_hecho,
+  edad_90_o_mas         = data_limpia$edad_categoria %in% c("90-94", "95+"),
+  edad_sin_equivalencia = is.na(data_limpia$edad_aprox),
+  sexo_invalido         = !(data_limpia$sexo %in% c("Hombre", "Mujer"))
+)
+
+tabla_inconsistencias <- data.frame(
+  Regla = names(inconsistencias),
+  Registros = colSums(inconsistencias),
+  row.names = NULL
+)
+
+tabla_inconsistencias
+```
+
+```{r}
+data_sin_errores <- data_limpia[rowSums(inconsistencias) == 0, ]
+```
+
+```{r}
+dim(data_sin_errores)
+```
+
+### Columnas constantes
+
+Una columna con un único valor no aporta información y rompe la estandarización (desviación estándar = 0). Las identificamos y las retiramos.
+
+```{r}
+cols_constantes <- names(data_sin_errores)[
+  sapply(data_sin_errores, function(x) length(unique(x)) == 1)
+]
+
+cols_constantes
+```
+
+```{r}
+data_sin_errores <- data_sin_errores[ , !(names(data_sin_errores) %in% cols_constantes)]
+
+dim(data_sin_errores)
+```
+
+## IDENTIFICACION DE VALORES ATÍPICOS
+
+La detección de datos atípicos (outliers) es un paso fundamental en el análisis exploratorio para identificar observaciones que se desvían significativamente del patrón general de los datos. Estas anomalías pueden surgir por errores de medición, fallos en el registro o representar eventos extremos genuinos dentro de la población estudiada. Identificarlos a tiempo es crucial, ya que su presencia puede distorsionar medidas estadísticas clave como la media y la desviación estándar, además de afectar la validez y el ajuste de los modelos predictivos posteriores.
+
+Para determinar estos valores en R se combinan herramientas visuales con criterios estadísticos objetivos. Gráficamente, el diagrama de caja y bigotes (boxplot) permite observar de inmediato los puntos que sobresalen de los límites esperados. Matemáticamente, el método más utilizado se basa en el Rango Intercuartílico ($IQR = Q_3 - Q_1$): se clasifica como atípica cualquier observación que caiga por debajo de $Q_1 - 1.5 \times IQR$ o por encima de $Q_3 + 1.5 \times IQR$. Este enfoque no paramétrico evita que los valores extremos influyan en el cálculo de los umbrales de detección.
+
+$$\text{Límite inferior} = Q_1 - 1.5 \times IQR \qquad \text{Límite superior} = Q_3 + 1.5 \times IQR$$
+
+```{r}
+# Función: límites del método IQR
+limites_iqr <- function(x) {
+  Q1 <- quantile(x, 0.25)
+  Q3 <- quantile(x, 0.75)
+  IQR_valor <- IQR(x)
+  c(inferior = unname(Q1 - 1.5 * IQR_valor),
+    superior = unname(Q3 + 1.5 * IQR_valor))
+}
+
+# Función: marca TRUE si el valor es atípico
+es_atipico <- function(x) {
+  lim <- limites_iqr(x)
+  x < lim[["inferior"]] | x > lim[["superior"]]
+}
+```
+
+```{r}
+# Tabla resumen de atípicos por variable
+tabla_atipicos <- do.call(rbind, lapply(vars_num, function(v) {
+  x <- data_sin_errores[[v]]
+  lim <- limites_iqr(x)
+  data.frame(
+    Variable = v,
+    Q1 = unname(quantile(x, 0.25)),
+    Q3 = unname(quantile(x, 0.75)),
+    IQR = IQR(x),
+    Limite_inferior = lim[["inferior"]],
+    Limite_superior = lim[["superior"]],
+    Atipicos = sum(es_atipico(x)),
+    Porcentaje = round(100 * mean(es_atipico(x)), 1)
+  )
+}))
+
+tabla_atipicos
+```
+
+```{r}
+# Marcamos los atípicos en columnas lógicas (sin eliminar todavía)
+for (v in vars_num) {
+  data_sin_errores[[paste0("atipico_", v)]] <- es_atipico(data_sin_errores[[v]])
+}
+
+# Ejemplo: casos atípicos en número de fuentes
+head(data_sin_errores[data_sin_errores$atipico_n_fuentes, c("match_group_id", "n_fuentes", "p_str_grupo", "yy_hecho")])
+```
+
+**En el año del hecho se detectan `r tabla_atipicos$Atipicos[1]` atípicos, en la edad aproximada `r tabla_atipicos$Atipicos[2]` (`r tabla_atipicos$Porcentaje[2]`%) y en el número de fuentes `r tabla_atipicos$Atipicos[3]` (`r tabla_atipicos$Porcentaje[3]`%). A diferencia de los ingresos negativos de la clase, estos valores no son errores: son personas adultas reclutadas (edad) y casos documentados en muchas fuentes (número de fuentes), es decir, la cola real de la distribución. Por eso, por defecto, solo se marcan y no se eliminan (parámetro `ELIMINAR_ATIPICOS <- FALSE`).**
+
+```{r}
+n_antes_atipicos <- nrow(data_sin_errores)
+
+if (ELIMINAR_ATIPICOS) {
+  data_sin_errores <- data_sin_errores[
+    rowSums(data_sin_errores[paste0("atipico_", vars_num)]) == 0,
+  ]
+}
+
+nrow(data_sin_errores)
+```
+
+**Análisis descriptivo**
+
+```{r}
+dim(data_sin_errores)
+```
+
+**Las dimensiones de nuestra tabla**
+
+```{r}
+resumen_num <- function(x) {
+  unname(c(mean(x), median(x), sd(x), min(x), max(x),
+           quantile(x, probs = 0.25),
+           quantile(x, probs = 0.50),
+           quantile(x, probs = 0.75)))
+}
+
+estadisticos <- data.frame(
+  Estadístico = c("Media", "Mediana", "Desviación Estándar", "Mínimo", "Máximo",
+                  "Q1 (25%)", "Q2 (50%)", "Q3 (75%)"),
+  sapply(data_sin_errores[vars_num], resumen_num),
+  row.names = NULL
+)
+
+estadisticos
+```
+
+**Medidas descriptivas de manera ordenada**
+
+Casos por año del hecho:
+
+```{r}
+casos_anio <- table(data_sin_errores$yy_hecho)
+
+plot(as.numeric(names(casos_anio)), as.numeric(casos_anio),
+     type = "b",
+     col = "darkblue",
+     pch = 19,
+     main = "Casos de reclutamiento por año del hecho",
+     xlab = "Año",
+     ylab = "Número de casos")
+```
+
+```{r}
+anio_pico <- names(casos_anio)[which.max(casos_anio)]
+```
+
+**El año con más casos es `r anio_pico`, con `r max(casos_anio)` registros.**
+
+Presunto responsable según sexo (porcentaje por fila):
+
+```{r}
+round(100 * prop.table(table(data_sin_errores$sexo, data_sin_errores$p_str_grupo), margin = 1), 1)
+```
+
+## ESTANDARIZACION DE VARIABLES
+
+La estandarización de variables (o transformación Z-score) es un método estadístico que permite llevar variables medidas en distintas unidades a una escala común, con media igual a cero y desviación estándar igual a uno.
+
+Matemáticamente, esto se logra aplicando la fórmula $Z = \dfrac{x - \bar{x}}{s}$, donde a cada dato individual ($x$) se le resta el promedio de la variable $\left(\bar{x} = \dfrac{\sum x_i}{n}\right)$ y el resultado se divide entre su desviación estándar muestral $\left(s = \sqrt{\dfrac{\sum (x_i - \bar{x})^2}{n-1}}\right)$. Es la definición que usa la función `scale()` de R (divisor $n-1$). Al realizar este cálculo, cada observación deja de expresarse en su unidad original para indicar cuántas desviaciones estándar se aleja del promedio, sin distorsionar la forma de la distribución.
+
+Este procedimiento es indispensable en la construcción de modelos predictivos, porque evita que las variables con magnitudes numéricas grandes dominen los resultados. Por ejemplo, aquí `yy_hecho` toma valores cercanos a 2000, mientras que `n_fuentes` apenas va de 1 a 10: un algoritmo basado en distancias (K-means, KNN) asumiría erróneamente que el año pesa mucho más. Al aplicar la transformación Z, las variables compiten en igualdad de condiciones.
+
+```{r}
+boxplot(
+  data_sin_errores[vars_num],
+  col = "skyblue",
+  border = "darkblue",
+  main = "Variables en su escala original",
+  las = 1)
+```
+
+```{r}
+for (v in vars_num) {
+  data_sin_errores[[paste0(v, "_est")]] <- as.numeric(scale(data_sin_errores[[v]]))
+}
+```
+
+```{r}
+summary(data_sin_errores[paste0(vars_num, "_est")])
+```
+
+```{r}
+boxplot(
+  data_sin_errores[paste0(vars_num, "_est")],
+  col = "skyblue",
+  border = "darkblue",
+  main = "Variables estandarizadas (Z-score)",
+  las = 1)
+```
+
+```{r}
+par(mfrow = c(1, 3))
+
+for (v in vars_num) {
+  hist(
+    data_sin_errores[[paste0(v, "_est")]],
+    col = "skyblue",
+    border = "darkblue",
+    main = paste(v, "(Z)"),
+    xlab = "Z")
+}
+
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# Verificación: media ~ 0 y desviación estándar = 1
+data.frame(
+  Variable = paste0(vars_num, "_est"),
+  Media = round(sapply(data_sin_errores[paste0(vars_num, "_est")], mean), 6),
+  Desv_Est = sapply(data_sin_errores[paste0(vars_num, "_est")], sd),
+  row.names = NULL
+)
+```
+
+# NORMALIZACION MIN-MAX
+
+La normalización min-max reescala la variable al rango [0, 1]:
+
+$$x_{norm} = \dfrac{x - x_{min}}{x_{max} - x_{min}}$$
+
+```{r}
+normalizar <- function(x) (x - min(x)) / (max(x) - min(x))
+
+for (v in vars_num) {
+  data_sin_errores[[paste0(v, "_norm")]] <- normalizar(data_sin_errores[[v]])
+}
+```
+
+```{r}
+# Verificación: mínimo y máximo de cada variable normalizada
+sapply(data_sin_errores[paste0(vars_num, "_norm")], range)
+```
+
+## Trazabilidad de la limpieza
+
+```{r}
+trazabilidad <- data.frame(
+  Etapa = c("Datos originales",
+            "Tras duplicados (según parámetro)",
+            "Tras eliminar valores perdidos",
+            "Tras errores e inconsistencias",
+            "Tras atípicos (según parámetro)"),
+  Filas = c(nrow(data), nrow(data_sin), nrow(data_limpia),
+            n_antes_atipicos, nrow(data_sin_errores))
+)
+
+trazabilidad$Filas_Eliminadas <- c(0, -diff(trazabilidad$Filas))
+
+trazabilidad
+```
+
+# EXPORTAR DATOS
+
+```{r}
+dir.create("../Resultados", showWarnings = FALSE)
+
+write_xlsx(data_sin_errores, "../Resultados/data_final_reclutamiento.xlsx")
+```
+
+**Se exportó la base final con `r nrow(data_sin_errores)` filas y `r ncol(data_sin_errores)` columnas, incluyendo las variables estandarizadas (`_est`), normalizadas (`_norm`) y las marcas de atípicos (`atipico_*`).**
